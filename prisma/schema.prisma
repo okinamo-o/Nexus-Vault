@@ -1,0 +1,34 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model Game {
+  id            String         @id @default(auto()) @map("_id") @db.ObjectId
+  title        String
+  slug         String         @unique
+  description  String
+  requirements Json?
+  imagePath    String
+  isActive     Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  downloadLinks DownloadLink[]
+}
+
+model DownloadLink {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  label     String
+  url       String
+  host      String
+  gameId    String   @db.ObjectId
+  game      Game     @relation(fields: [gameId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@index([gameId])
+}

@@ -1,0 +1,57 @@
+name: Nexus Vault Scraper
+
+on:
+  schedule:
+    - cron: "0 */12 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r scraper/requirements.txt
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Run Scraper
+        env:
+          DATABASE_URL: ${{ secrets.MONGODB_DATABASE_URL }}
+          MONGODB_DB_NAME: ${{ secrets.MONGODB_DB_NAME }}
+          HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
+          HF_MODEL: ${{ vars.HF_MODEL }}
+          SCRAPER_LIMIT: "0"
+          SCRAPER_UA_ROTATE_EVERY: "20"
+        run: python scraper/main.py --limit 0
+
+      - name: Commit Updated WebP Assets
+        run: |
+          CHANGES="$(git status --porcelain public/games)"
+          if [ -z "$CHANGES" ]; then
+            echo "No image asset changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/games
+          git commit -m "chore(scraper): refresh game webp assets [skip ci]"
+          git push
