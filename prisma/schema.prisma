@@ -3,31 +3,31 @@ generator client {
 }
 
 datasource db {
-  provider = "mongodb"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
 model Game {
-  id            String         @id @default(auto()) @map("_id") @db.ObjectId
-  title        String
-  slug         String         @unique
-  description  String
-  requirements Json?
-  imagePath    String
-  isActive     Boolean        @default(true)
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @updatedAt
+  id            Int            @id @default(autoincrement())
+  title         String
+  slug          String         @unique
+  description   String
+  requirements  String?
+  imagePath     String
+  isActive      Boolean        @default(true)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
 
   downloadLinks DownloadLink[]
 }
 
 model DownloadLink {
-  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  id        Int      @id @default(autoincrement())
   label     String
   url       String
   host      String
-  gameId    String   @db.ObjectId
-  game      Game     @relation(fields: [gameId], references: [id])
+  gameId    Int
+  game      Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
 
   @@index([gameId])

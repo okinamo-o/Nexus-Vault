@@ -1,4 +1,4 @@
-# Nexus Vault Scraper (Phase 1)
+# Nexus Vault Scraper (Local Beta)
 
 ## Setup
 
@@ -14,26 +14,17 @@ python -m playwright install chromium
 Use project root `.env`:
 
 ```env
-DATABASE_URL="mongodb+srv://<username>:<password>@<cluster>.mongodb.net/nexus_vault?retryWrites=true&w=majority"
-MONGODB_DB_NAME="nexus_vault"
-HF_API_TOKEN=""
-HF_MODEL="google/flan-t5-large"
+DATABASE_URL="file:./dev.db"
 SCRAPER_LIMIT="30"
 SCRAPER_UA_ROTATE_EVERY="20"
+OLLAMA_REWRITE_ENABLED="0"
+OLLAMA_BASE_URL="http://127.0.0.1:11434"
+OLLAMA_MODEL="llama3.1:8b"
 ```
 
 ## Run
 
 ```bash
-python scraper/main.py --limit 30
+python scraper/main.py --init-db-only
+python scraper/main.py --limit 5
 ```
-
-Dry run (no DB writes):
-
-```bash
-python scraper/main.py --limit 5 --dry-run
-```
-
-## GitHub Actions
-
-The repository workflow at `.github/workflows/scrape.yml` runs this script every 12 hours and writes directly to MongoDB Atlas.

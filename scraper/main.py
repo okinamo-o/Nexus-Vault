@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,14 +19,12 @@ from dotenv import load_dotenv
 from PIL import Image
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 from playwright_stealth import Stealth
-from pymongo import MongoClient, ReturnDocument
-from pymongo.collection import Collection
 
 SOURCE_LIST_URL = "https://steamrip.com/games-list/"
 SOURCE_DOMAIN = "steamrip.com"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_GAMES_DIR = PROJECT_ROOT / "public" / "games"
-HF_API_BASE = "https://api-inference.huggingface.co/models"
+DEFAULT_DB_PATH = PROJECT_ROOT / "prisma" / "dev.db"
 
 USER_AGENTS = [
     # Chrome 130+
@@ -35,11 +34,9 @@ USER_AGENTS = [
     "(KHTML, like Gecko) Chrome/131.0.6778.205 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/130.0.6723.116 Safari/537.36",
-    # Safari (latest generation)
+    # Safari
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_4) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Version/18.3 Safari/605.1.15",
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 "
-    "(KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1",
 ]
 
 BANNED_TERMS_RE = re.compile(
@@ -93,7 +90,7 @@ class ScrapedGame:
     title: str
     slug: str
     description: str
-    requirements_data: dict[str, str] | None
+    requirements_json: str | None
     image_path: str
     download_links: list[dict[str, str]]
     source_url: str
@@ -108,31 +105,62 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def require_mongodb_uri() -> str:
-    uri = os.getenv("DATABASE_URL", "").strip()
-    if uri.startswith("mongodb://") or uri.startswith("mongodb+srv://"):
-        return uri
-    raise ValueError(
-        "DATABASE_URL must be a MongoDB URI (mongodb:// or mongodb+srv://)."
+def resolve_sqlite_path() -> Path:
+    db_url = os.getenv("DATABASE_URL", "file:./dev.db").strip()
+    if not db_url.startswith("file:"):
+        raise ValueError(f"DATABASE_URL must use sqlite file: URL, got: {db_url}")
+
+    raw_path = db_url[len("file:") :]
+    if not raw_path:
+        return DEFAULT_DB_PATH
+
+    candidate = Path(raw_path)
+    if candidate.is_absolute():
+        return candidate
+
+    # Prisma resolves sqlite relative to the schema directory.
+    if raw_path.startswith("./"):
+        return (PROJECT_ROOT / "prisma" / raw_path[2:]).resolve()
+
+    return (PROJECT_ROOT / "prisma" / raw_path).resolve()
+
+
+def create_db_connection(db_path: Path) -> sqlite3.Connection:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def init_db_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS "Game" (
+          "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+          "title" TEXT NOT NULL,
+          "slug" TEXT NOT NULL UNIQUE,
+          "description" TEXT NOT NULL,
+          "requirements" TEXT,
+          "imagePath" TEXT NOT NULL,
+          "isActive" BOOLEAN NOT NULL DEFAULT 1,
+          "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS "DownloadLink" (
+          "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+          "label" TEXT NOT NULL,
+          "url" TEXT NOT NULL,
+          "host" TEXT NOT NULL,
+          "gameId" INTEGER NOT NULL,
+          "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY ("gameId") REFERENCES "Game" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS "DownloadLink_gameId_idx" ON "DownloadLink" ("gameId");
+        """
     )
-
-
-def get_database(client: MongoClient):
-    db_name = os.getenv("MONGODB_DB_NAME", "").strip()
-    if db_name:
-        return client[db_name]
-
-    try:
-        return client.get_default_database()
-    except Exception as exc:  # noqa: BLE001
-        raise ValueError(
-            "No database name found. Set MONGODB_DB_NAME or include the DB name in DATABASE_URL."
-        ) from exc
-
-
-def ensure_indexes(games: Collection, links: Collection) -> None:
-    games.create_index("slug", unique=True)
-    links.create_index("gameId")
+    conn.commit()
 
 
 def slugify(value: str) -> str:
@@ -155,6 +183,57 @@ def sanitize_text(text: str) -> str:
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
+
+
+def rewrite_with_ollama(sanitized_text: str) -> str | None:
+    enabled = os.getenv("OLLAMA_REWRITE_ENABLED", "0").strip() == "1"
+    if not enabled:
+        return None
+
+    base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip().rstrip("/")
+    model = os.getenv("OLLAMA_MODEL", "llama3.1:8b").strip()
+    if not model:
+        return None
+
+    prompt = (
+        "Rewrite this game description in a professional, third-person editorial style. "
+        "Focus on gameplay and features. "
+        "Do not mention SteamRIP, Discord, Telegram, or any external sites. "
+        "Output only the rewritten description.\n\n"
+        f"{sanitized_text}"
+    )
+    payload = {"model": model, "prompt": prompt, "stream": False}
+
+    try:
+        response = requests.post(
+            f"{base_url}/api/generate",
+            json=payload,
+            timeout=120,
+        )
+        response.raise_for_status()
+        data = response.json()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{now_iso()}] Ollama rewrite failed, using regex-only text: {exc}")
+        return None
+
+    rewritten = data.get("response")
+    if isinstance(rewritten, str) and rewritten.strip():
+        return rewritten.strip()
+    return None
+
+
+def rewrite_description(raw_text: str) -> str:
+    if not raw_text:
+        return ""
+
+    # Primary method for local beta: regex sanitization.
+    sanitized = sanitize_text(raw_text)
+
+    # Optional local LLM hook via Ollama.
+    ollama_rewrite = rewrite_with_ollama(sanitized)
+    if ollama_rewrite:
+        return sanitize_text(ollama_rewrite)
+    return sanitized
 
 
 def extract_article_body_from_schema(soup: BeautifulSoup) -> str:
@@ -483,87 +562,6 @@ def format_host_label(url: str) -> tuple[str, str]:
     return label, host
 
 
-def extract_generated_text(payload: object) -> str:
-    if isinstance(payload, list) and payload:
-        first = payload[0]
-        if isinstance(first, dict):
-            for key in ("generated_text", "summary_text", "text"):
-                value = first.get(key)
-                if isinstance(value, str):
-                    return value.strip()
-        if isinstance(first, str):
-            return first.strip()
-
-    if isinstance(payload, dict):
-        for key in ("generated_text", "summary_text", "text"):
-            value = payload.get(key)
-            if isinstance(value, str):
-                return value.strip()
-    return ""
-
-
-def rewrite_description(raw_text: str, hf_token: str | None, hf_model: str) -> str:
-    if not raw_text:
-        return ""
-
-    if not hf_token:
-        return sanitize_text(raw_text)
-
-    prompt = (
-        "Rewrite this game description in a professional, third-person editorial style. "
-        "Focus on gameplay and features. DO NOT mention SteamRIP, Discord, or any external sites. "
-        "Output only the new description.\n\n"
-        f"{raw_text}"
-    )
-
-    endpoint = f"{HF_API_BASE}/{hf_model}"
-    headers = {
-        "Authorization": f"Bearer {hf_token}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "inputs": prompt,
-        "parameters": {
-            "max_new_tokens": 240,
-            "temperature": 0.4,
-            "return_full_text": False,
-        },
-    }
-
-    for attempt in range(3):
-        try:
-            response = requests.post(endpoint, headers=headers, json=payload, timeout=80)
-        except requests.RequestException as exc:
-            print(f"[{now_iso()}] Hugging Face request failed: {exc}")
-            break
-
-        if response.status_code == 503:
-            wait_seconds = min(15, 3 + attempt * 4)
-            time.sleep(wait_seconds)
-            continue
-
-        if response.status_code >= 400:
-            print(
-                f"[{now_iso()}] Hugging Face rewrite failed: {response.status_code} {response.text[:240]}"
-            )
-            break
-
-        try:
-            body = response.json()
-        except json.JSONDecodeError:
-            break
-
-        generated = extract_generated_text(body)
-        if generated:
-            return sanitize_text(generated)
-
-        if isinstance(body, dict) and isinstance(body.get("error"), str):
-            print(f"[{now_iso()}] Hugging Face rewrite returned error: {body['error']}")
-            break
-
-    return sanitize_text(raw_text)
-
-
 async def random_delay() -> None:
     await asyncio.sleep(random.uniform(2.0, 5.0))
 
@@ -659,8 +657,6 @@ def clean_link_records(links: list[str]) -> list[dict[str, str]]:
 async def scrape_game(
     context: BrowserContext,
     session: requests.Session,
-    hf_token: str | None,
-    hf_model: str,
     game_url: str,
 ) -> ScrapedGame | None:
     page = await context.new_page()
@@ -684,11 +680,11 @@ async def scrape_game(
     title = normalize_game_title(raw_title)
     slug = slugify(title) or slugify(urlparse(game_url).path.strip("/")) or f"game-{int(time.time())}"
 
-    raw_description = sanitize_text(extract_raw_description(soup))
-    rewritten_description = rewrite_description(raw_description, hf_token, hf_model)
+    raw_description = extract_raw_description(soup)
+    rewritten_description = rewrite_description(raw_description)
 
     requirements = parse_requirements(soup)
-    requirements_data = requirements or None
+    requirements_json = json.dumps(requirements, ensure_ascii=False) if requirements else None
 
     image_url = extract_featured_image_url(soup, game_url)
     image_path = download_and_convert_image(session, image_url, slug)
@@ -707,77 +703,79 @@ async def scrape_game(
         title=title,
         slug=slug,
         description=rewritten_description or sanitize_text(raw_description) or title,
-        requirements_data=requirements_data,
+        requirements_json=requirements_json,
         image_path=image_path,
         download_links=download_links,
         source_url=game_url,
     )
 
 
-def upsert_game(
-    games_collection: Collection,
-    links_collection: Collection,
-    game: ScrapedGame,
-) -> None:
-    now = datetime.now(timezone.utc)
-    updated_game = games_collection.find_one_and_update(
-        {"slug": game.slug},
-        {
-            "$set": {
-                "title": game.title,
-                "slug": game.slug,
-                "description": game.description,
-                "requirements": game.requirements_data,
-                "imagePath": game.image_path,
-                "isActive": True,
-                "updatedAt": now,
-            },
-            "$setOnInsert": {"createdAt": now},
-        },
-        upsert=True,
-        return_document=ReturnDocument.AFTER,
-    )
+def upsert_game(conn: sqlite3.Connection, game: ScrapedGame) -> None:
+    cursor = conn.cursor()
+    cursor.execute('SELECT "id" FROM "Game" WHERE "slug" = ?', (game.slug,))
+    row = cursor.fetchone()
 
-    game_id = updated_game["_id"]
-    links_collection.delete_many({"gameId": game_id})
-    if not game.download_links:
-        return
+    if row:
+        game_id = int(row["id"])
+        cursor.execute(
+            """
+            UPDATE "Game"
+            SET "title" = ?, "description" = ?, "requirements" = ?, "imagePath" = ?,
+                "isActive" = 1, "updatedAt" = CURRENT_TIMESTAMP
+            WHERE "id" = ?
+            """,
+            (
+                game.title,
+                game.description,
+                game.requirements_json,
+                game.image_path,
+                game_id,
+            ),
+        )
+    else:
+        cursor.execute(
+            """
+            INSERT INTO "Game" ("title", "slug", "description", "requirements", "imagePath", "isActive", "createdAt", "updatedAt")
+            VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (
+                game.title,
+                game.slug,
+                game.description,
+                game.requirements_json,
+                game.image_path,
+            ),
+        )
+        game_id = int(cursor.lastrowid)
 
-    link_docs = [
-        {
-            "label": link["label"],
-            "url": link["url"],
-            "host": link["host"],
-            "gameId": game_id,
-            "createdAt": now,
-        }
-        for link in game.download_links
-    ]
-    links_collection.insert_many(link_docs)
+    cursor.execute('DELETE FROM "DownloadLink" WHERE "gameId" = ?', (game_id,))
+    for link in game.download_links:
+        cursor.execute(
+            """
+            INSERT INTO "DownloadLink" ("label", "url", "host", "gameId", "createdAt")
+            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (link["label"], link["url"], link["host"], game_id),
+        )
+
+    conn.commit()
+
+
+def initialize_database_only() -> None:
+    db_path = resolve_sqlite_path()
+    connection = create_db_connection(db_path)
+    try:
+        init_db_schema(connection)
+    finally:
+        connection.close()
+    print(f"[{now_iso()}] SQLite database initialized at: {db_path}")
 
 
 async def run_scraper(limit: int, dry_run: bool, rotate_every: int) -> None:
-    hf_token = os.getenv("HF_API_TOKEN", "").strip() or None
-    hf_model = os.getenv("HF_MODEL", "google/flan-t5-large").strip() or "google/flan-t5-large"
-
-    if not hf_token:
-        print(f"[{now_iso()}] HF_API_TOKEN not set. Falling back to regex sanitization.")
-
-    mongo_client: MongoClient | None = None
-    games_collection: Collection | None = None
-    links_collection: Collection | None = None
-
-    if not dry_run:
-        mongo_uri = require_mongodb_uri()
-        mongo_client = MongoClient(mongo_uri, serverSelectionTimeoutMS=20_000)
-        mongo_client.admin.command("ping")
-        database = get_database(mongo_client)
-        games_collection = database["Game"]
-        links_collection = database["DownloadLink"]
-        ensure_indexes(games_collection, links_collection)
-        print(f"[{now_iso()}] Connected to MongoDB database: {database.name}")
-    else:
-        print(f"[{now_iso()}] Dry run enabled: MongoDB writes are disabled.")
+    db_path = resolve_sqlite_path()
+    conn = create_db_connection(db_path)
+    init_db_schema(conn)
+    print(f"[{now_iso()}] Using SQLite database: {db_path}")
 
     session = requests.Session()
     session.headers.update({"Accept-Language": "en-US,en;q=0.9"})
@@ -804,13 +802,7 @@ async def run_scraper(limit: int, dry_run: bool, rotate_every: int) -> None:
                 await random_delay()
                 print(f"[{now_iso()}] [{index}/{len(game_urls)}] Scraping: {game_url}")
 
-                scraped = await scrape_game(
-                    context=context,
-                    session=session,
-                    hf_token=hf_token,
-                    hf_model=hf_model,
-                    game_url=game_url,
-                )
+                scraped = await scrape_game(context=context, session=session, game_url=game_url)
                 if not scraped:
                     failed += 1
                     continue
@@ -820,9 +812,8 @@ async def run_scraper(limit: int, dry_run: bool, rotate_every: int) -> None:
                     f"links={len(scraped.download_links)}"
                 )
 
-                if not dry_run and games_collection is not None and links_collection is not None:
-                    upsert_game(games_collection, links_collection, scraped)
-
+                if not dry_run:
+                    upsert_game(conn, scraped)
                 succeeded += 1
 
             print(
@@ -831,12 +822,11 @@ async def run_scraper(limit: int, dry_run: bool, rotate_every: int) -> None:
         finally:
             await context.close()
             await browser.close()
-            if mongo_client is not None:
-                mongo_client.close()
+            conn.close()
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Nexus Vault cloud scraper.")
+    parser = argparse.ArgumentParser(description="Nexus Vault local beta scraper.")
     parser.add_argument(
         "--limit",
         type=int,
@@ -846,7 +836,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Run scraper without writing to MongoDB.",
+        help="Run scraper without writing to SQLite.",
     )
     parser.add_argument(
         "--ua-rotate-every",
@@ -854,12 +844,22 @@ def parse_args() -> argparse.Namespace:
         default=int(os.getenv("SCRAPER_UA_ROTATE_EVERY", "20")),
         help="Rotate browser context/user-agent after N games.",
     )
+    parser.add_argument(
+        "--init-db-only",
+        action="store_true",
+        help="Initialize local SQLite schema and exit.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     load_environment()
     args = parse_args()
+
+    if args.init_db_only:
+        initialize_database_only()
+        return
+
     try:
         asyncio.run(run_scraper(args.limit, args.dry_run, args.ua_rotate_every))
     except KeyboardInterrupt:

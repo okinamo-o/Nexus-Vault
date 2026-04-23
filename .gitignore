@@ -46,3 +46,6 @@ __pycache__/
 
 # local prisma sqlite artifact (legacy)
 prisma/dev.db
+
+# local runtime metrics
+storage/
