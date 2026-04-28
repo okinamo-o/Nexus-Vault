@@ -26,10 +26,16 @@ async function writeMetrics(metrics: SiteMetrics): Promise<void> {
 }
 
 export async function incrementVisitorCounter(): Promise<number> {
-  const metrics = await readMetrics();
-  const nextValue = metrics.visitors + 1;
-  await writeMetrics({ visitors: nextValue });
-  return nextValue;
+  try {
+    const metrics = await readMetrics();
+    const nextValue = metrics.visitors + 1;
+    await writeMetrics({ visitors: nextValue });
+    return nextValue;
+  } catch {
+    // On serverless platforms with read-only filesystem (e.g. Vercel),
+    // metrics writes can fail. Never crash page rendering for analytics.
+    return 0;
+  }
 }
 
 export async function getVisitorCounter(): Promise<number> {
