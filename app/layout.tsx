@@ -18,6 +18,11 @@ export const metadata: Metadata = {
     template: "%s | Nexus Vault",
   },
   description: "The Definitive Digital Archive.",
+  icons: {
+    icon: "/favicon.png",
+    apple: "/apple-touch-icon.png",
+    shortcut: "/favicon.png",
+  },
   referrer: "no-referrer",
   robots: {
     index: false,

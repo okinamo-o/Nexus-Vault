@@ -14,7 +14,11 @@ python -m playwright install chromium
 Use project root `.env`:
 
 ```env
-DATABASE_URL="file:./dev.db"
+# SQLite (local)
+# DATABASE_URL="file:./dev.db"
+
+# PostgreSQL (Neon/Render/Supabase)
+DATABASE_URL="postgresql://user:password@host/dbname?sslmode=require"
 SCRAPER_LIMIT="30"
 SCRAPER_UA_ROTATE_EVERY="20"
 OLLAMA_REWRITE_ENABLED="0"
@@ -28,3 +32,5 @@ OLLAMA_MODEL="llama3.1:8b"
 python scraper/main.py --init-db-only
 python scraper/main.py --limit 5
 ```
+
+The scraper now supports both SQLite and PostgreSQL based on `DATABASE_URL`.

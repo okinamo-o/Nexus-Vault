@@ -13,12 +13,14 @@ from pathlib import Path
 from typing import Iterable
 from urllib.parse import parse_qs, urljoin, urlparse, urlunparse
 
+import psycopg
 import requests
 from bs4 import BeautifulSoup, NavigableString, Tag
 from dotenv import load_dotenv
 from PIL import Image
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 from playwright_stealth import Stealth
+from psycopg.rows import dict_row
 
 SOURCE_LIST_URL = "https://steamrip.com/games-list/"
 SOURCE_DOMAIN = "steamrip.com"
@@ -96,6 +98,13 @@ class ScrapedGame:
     source_url: str
 
 
+@dataclass
+class DbConfig:
+    kind: str
+    sqlite_path: Path | None = None
+    postgres_url: str | None = None
+
+
 def load_environment() -> None:
     load_dotenv(PROJECT_ROOT / ".env")
     load_dotenv(PROJECT_ROOT / ".env.local", override=True)
@@ -105,8 +114,7 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def resolve_sqlite_path() -> Path:
-    db_url = os.getenv("DATABASE_URL", "file:./dev.db").strip()
+def resolve_sqlite_path(db_url: str) -> Path:
     if not db_url.startswith("file:"):
         raise ValueError(f"DATABASE_URL must use sqlite file: URL, got: {db_url}")
 
@@ -125,41 +133,90 @@ def resolve_sqlite_path() -> Path:
     return (PROJECT_ROOT / "prisma" / raw_path).resolve()
 
 
-def create_db_connection(db_path: Path) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(db_path)
-    connection.row_factory = sqlite3.Row
-    return connection
+def resolve_db_config() -> DbConfig:
+    db_url = os.getenv("DATABASE_URL", "file:./dev.db").strip()
+    if db_url.startswith("postgresql://") or db_url.startswith("postgres://"):
+        return DbConfig(kind="postgresql", postgres_url=db_url)
+    if db_url.startswith("file:"):
+        return DbConfig(kind="sqlite", sqlite_path=resolve_sqlite_path(db_url))
+    raise ValueError(f"Unsupported DATABASE_URL protocol, got: {db_url}")
 
 
-def init_db_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS "Game" (
-          "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-          "title" TEXT NOT NULL,
-          "slug" TEXT NOT NULL UNIQUE,
-          "description" TEXT NOT NULL,
-          "requirements" TEXT,
-          "imagePath" TEXT NOT NULL,
-          "isActive" BOOLEAN NOT NULL DEFAULT 1,
-          "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
+def create_db_connection(config: DbConfig):
+    if config.kind == "sqlite":
+        assert config.sqlite_path is not None
+        config.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(config.sqlite_path)
+        connection.row_factory = sqlite3.Row
+        return connection
 
-        CREATE TABLE IF NOT EXISTS "DownloadLink" (
-          "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-          "label" TEXT NOT NULL,
-          "url" TEXT NOT NULL,
-          "host" TEXT NOT NULL,
-          "gameId" INTEGER NOT NULL,
-          "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          FOREIGN KEY ("gameId") REFERENCES "Game" ("id") ON DELETE CASCADE ON UPDATE CASCADE
-        );
+    assert config.postgres_url is not None
+    return psycopg.connect(config.postgres_url, row_factory=dict_row)
 
-        CREATE INDEX IF NOT EXISTS "DownloadLink_gameId_idx" ON "DownloadLink" ("gameId");
-        """
-    )
+
+def init_db_schema(conn, config: DbConfig) -> None:
+    if config.kind == "sqlite":
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS "Game" (
+              "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+              "title" TEXT NOT NULL,
+              "slug" TEXT NOT NULL UNIQUE,
+              "description" TEXT NOT NULL,
+              "requirements" TEXT,
+              "imagePath" TEXT NOT NULL,
+              "isActive" BOOLEAN NOT NULL DEFAULT 1,
+              "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS "DownloadLink" (
+              "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+              "label" TEXT NOT NULL,
+              "url" TEXT NOT NULL,
+              "host" TEXT NOT NULL,
+              "gameId" INTEGER NOT NULL,
+              "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY ("gameId") REFERENCES "Game" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS "DownloadLink_gameId_idx" ON "DownloadLink" ("gameId");
+            """
+        )
+        conn.commit()
+        return
+
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS "Game" (
+              "id" INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+              "title" TEXT NOT NULL,
+              "slug" TEXT NOT NULL UNIQUE,
+              "description" TEXT NOT NULL,
+              "requirements" TEXT,
+              "imagePath" TEXT NOT NULL,
+              "isActive" BOOLEAN NOT NULL DEFAULT TRUE,
+              "createdAt" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              "updatedAt" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS "DownloadLink" (
+              "id" INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+              "label" TEXT NOT NULL,
+              "url" TEXT NOT NULL,
+              "host" TEXT NOT NULL,
+              "gameId" INTEGER NOT NULL REFERENCES "Game"("id") ON DELETE CASCADE ON UPDATE CASCADE,
+              "createdAt" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS "DownloadLink_gameId_idx" ON "DownloadLink" ("gameId")'
+        )
     conn.commit()
 
 
@@ -710,19 +767,20 @@ async def scrape_game(
     )
 
 
-def upsert_game(conn: sqlite3.Connection, game: ScrapedGame) -> None:
+def upsert_game(conn, config: DbConfig, game: ScrapedGame) -> None:
     cursor = conn.cursor()
-    cursor.execute('SELECT "id" FROM "Game" WHERE "slug" = ?', (game.slug,))
+    placeholder = "?" if config.kind == "sqlite" else "%s"
+    cursor.execute(f'SELECT "id" FROM "Game" WHERE "slug" = {placeholder}', (game.slug,))
     row = cursor.fetchone()
 
     if row:
         game_id = int(row["id"])
         cursor.execute(
-            """
+            f"""
             UPDATE "Game"
-            SET "title" = ?, "description" = ?, "requirements" = ?, "imagePath" = ?,
-                "isActive" = 1, "updatedAt" = CURRENT_TIMESTAMP
-            WHERE "id" = ?
+            SET "title" = {placeholder}, "description" = {placeholder}, "requirements" = {placeholder}, "imagePath" = {placeholder},
+                "isActive" = {"1" if config.kind == "sqlite" else "TRUE"}, "updatedAt" = CURRENT_TIMESTAMP
+            WHERE "id" = {placeholder}
             """,
             (
                 game.title,
@@ -733,27 +791,45 @@ def upsert_game(conn: sqlite3.Connection, game: ScrapedGame) -> None:
             ),
         )
     else:
-        cursor.execute(
-            """
-            INSERT INTO "Game" ("title", "slug", "description", "requirements", "imagePath", "isActive", "createdAt", "updatedAt")
-            VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """,
-            (
-                game.title,
-                game.slug,
-                game.description,
-                game.requirements_json,
-                game.image_path,
-            ),
-        )
-        game_id = int(cursor.lastrowid)
+        if config.kind == "sqlite":
+            cursor.execute(
+                """
+                INSERT INTO "Game" ("title", "slug", "description", "requirements", "imagePath", "isActive", "createdAt", "updatedAt")
+                VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (
+                    game.title,
+                    game.slug,
+                    game.description,
+                    game.requirements_json,
+                    game.image_path,
+                ),
+            )
+            game_id = int(cursor.lastrowid)
+        else:
+            cursor.execute(
+                """
+                INSERT INTO "Game" ("title", "slug", "description", "requirements", "imagePath", "isActive", "createdAt", "updatedAt")
+                VALUES (%s, %s, %s, %s, %s, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                RETURNING "id"
+                """,
+                (
+                    game.title,
+                    game.slug,
+                    game.description,
+                    game.requirements_json,
+                    game.image_path,
+                ),
+            )
+            inserted = cursor.fetchone()
+            game_id = int(inserted["id"])
 
-    cursor.execute('DELETE FROM "DownloadLink" WHERE "gameId" = ?', (game_id,))
+    cursor.execute(f'DELETE FROM "DownloadLink" WHERE "gameId" = {placeholder}', (game_id,))
     for link in game.download_links:
         cursor.execute(
-            """
+            f"""
             INSERT INTO "DownloadLink" ("label", "url", "host", "gameId", "createdAt")
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, CURRENT_TIMESTAMP)
             """,
             (link["label"], link["url"], link["host"], game_id),
         )
@@ -762,20 +838,23 @@ def upsert_game(conn: sqlite3.Connection, game: ScrapedGame) -> None:
 
 
 def initialize_database_only() -> None:
-    db_path = resolve_sqlite_path()
-    connection = create_db_connection(db_path)
+    config = resolve_db_config()
+    connection = create_db_connection(config)
     try:
-        init_db_schema(connection)
+        init_db_schema(connection, config)
     finally:
         connection.close()
-    print(f"[{now_iso()}] SQLite database initialized at: {db_path}")
+    print(f"[{now_iso()}] Database initialized for provider: {config.kind}")
 
 
 async def run_scraper(limit: int, dry_run: bool, rotate_every: int) -> None:
-    db_path = resolve_sqlite_path()
-    conn = create_db_connection(db_path)
-    init_db_schema(conn)
-    print(f"[{now_iso()}] Using SQLite database: {db_path}")
+    config = resolve_db_config()
+    conn = create_db_connection(config)
+    init_db_schema(conn, config)
+    if config.kind == "sqlite":
+        print(f"[{now_iso()}] Using SQLite database: {config.sqlite_path}")
+    else:
+        print(f"[{now_iso()}] Using PostgreSQL database.")
 
     session = requests.Session()
     session.headers.update({"Accept-Language": "en-US,en;q=0.9"})
@@ -813,7 +892,7 @@ async def run_scraper(limit: int, dry_run: bool, rotate_every: int) -> None:
                 )
 
                 if not dry_run:
-                    upsert_game(conn, scraped)
+                    upsert_game(conn, config, scraped)
                 succeeded += 1
 
             print(
@@ -836,7 +915,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Run scraper without writing to SQLite.",
+        help="Run scraper without writing to database.",
     )
     parser.add_argument(
         "--ua-rotate-every",
@@ -847,7 +926,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--init-db-only",
         action="store_true",
-        help="Initialize local SQLite schema and exit.",
+        help="Initialize schema for configured database and exit.",
     )
     return parser.parse_args()
 
