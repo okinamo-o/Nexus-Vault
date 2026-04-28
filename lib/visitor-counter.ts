@@ -3,6 +3,7 @@ import path from "node:path";
 
 const metricsDir = path.join(process.cwd(), "storage");
 const metricsFile = path.join(metricsDir, "site-metrics.json");
+const isReadOnlyRuntime = process.env.VERCEL === "1" || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME);
 
 type SiteMetrics = {
   visitors: number;
@@ -26,6 +27,8 @@ async function writeMetrics(metrics: SiteMetrics): Promise<void> {
 }
 
 export async function incrementVisitorCounter(): Promise<number> {
+  if (isReadOnlyRuntime) return 0;
+
   try {
     const metrics = await readMetrics();
     const nextValue = metrics.visitors + 1;
@@ -39,6 +42,8 @@ export async function incrementVisitorCounter(): Promise<number> {
 }
 
 export async function getVisitorCounter(): Promise<number> {
+  if (isReadOnlyRuntime) return 0;
+
   const metrics = await readMetrics();
   return metrics.visitors;
 }
