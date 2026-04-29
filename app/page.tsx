@@ -38,61 +38,77 @@ export default async function HomePage({ searchParams }: HomePageProps) {
   const requireSpecs = searchParams?.req === "1";
   const requireMirrors = searchParams?.mirrors === "1";
 
-  const allGames = await prisma.game.findMany({
-    where: {
-      isActive: true,
-      ...(requireSpecs ? { requirements: { not: null } } : {}),
-      ...(requireMirrors ? { downloadLinks: { some: {} } } : {}),
-      ...(searchTerms.length > 0
-        ? {
-            AND: searchTerms.map((term) => ({
-              OR: [
-                { title: { contains: term, mode: "insensitive" } },
-                { description: { contains: term, mode: "insensitive" } },
-              ],
-            })),
-          }
-        : {}),
-    },
-    select: {
-      id: true,
-      title: true,
-      slug: true,
-      description: true,
-      imagePath: true,
-      requirements: true,
-      updatedAt: true,
-      createdAt: true,
-      _count: {
-        select: {
-          downloadLinks: true,
+  const baseWhere = {
+    isActive: true,
+    ...(requireSpecs ? { requirements: { not: null } } : {}),
+    ...(requireMirrors ? { downloadLinks: { some: {} } } : {}),
+    ...(searchTerms.length > 0
+      ? {
+          AND: searchTerms.map((term) => ({
+            OR: [
+              { title: { contains: term, mode: "insensitive" as const } },
+              { description: { contains: term, mode: "insensitive" as const } },
+            ],
+          })),
+        }
+      : {}),
+  };
+
+  const [totalMatched, games, topCharts, updatesFeed] = await Promise.all([
+    prisma.game.count({ where: baseWhere }),
+    prisma.game.findMany({
+      where: baseWhere,
+      orderBy:
+        sort === "az"
+          ? { title: "asc" }
+          : sort === "updated"
+          ? { updatedAt: "desc" }
+          : sort === "mirrors"
+          ? { downloadLinks: { _count: "desc" } }
+          : { createdAt: "desc" },
+      take: 60,
+      select: {
+        id: true,
+        title: true,
+        slug: true,
+        description: true,
+        imagePath: true,
+        requirements: true,
+        updatedAt: true,
+        createdAt: true,
+        _count: {
+          select: { downloadLinks: true },
         },
       },
-    },
-  });
-
-  const totalMatched = allGames.length;
-
-  const games = [...allGames]
-    .sort((a, b) => {
-      if (sort === "az") return a.title.localeCompare(b.title);
-      if (sort === "updated") return b.updatedAt.getTime() - a.updatedAt.getTime();
-      if (sort === "mirrors") return b._count.downloadLinks - a._count.downloadLinks;
-      return b.createdAt.getTime() - a.createdAt.getTime();
-    })
-    .slice(0, 60);
-
-  const topCharts = [...allGames]
-    .sort((a, b) => {
-      const scoreA = a._count.downloadLinks * 5 + (a.updatedAt.getTime() - a.createdAt.getTime()) / 86_400_000;
-      const scoreB = b._count.downloadLinks * 5 + (b.updatedAt.getTime() - b.createdAt.getTime()) / 86_400_000;
-      return scoreB - scoreA;
-    })
-    .slice(0, 6);
-
-  const updatesFeed = [...allGames]
-    .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())
-    .slice(0, 8);
+    }),
+    prisma.game.findMany({
+      where: baseWhere,
+      orderBy: [
+        { downloadLinks: { _count: "desc" } },
+        { updatedAt: "desc" },
+      ],
+      take: 6,
+      select: {
+        id: true,
+        title: true,
+        slug: true,
+        _count: {
+          select: { downloadLinks: true },
+        },
+      },
+    }),
+    prisma.game.findMany({
+      where: baseWhere,
+      orderBy: { updatedAt: "desc" },
+      take: 8,
+      select: {
+        id: true,
+        title: true,
+        slug: true,
+        updatedAt: true,
+      },
+    }),
+  ]);
 
   return (
     <main className="min-h-screen pb-10">

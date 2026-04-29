@@ -603,8 +603,30 @@ def download_and_convert_image(
     with Image.open(memory := BytesIO(response.content)) as image:
         if image.mode not in {"RGB", "RGBA"}:
             image = image.convert("RGB")
-        image.save(output_path, "WEBP", quality=88, method=6)
+        out_memory = BytesIO()
+        image.save(out_memory, "WEBP", quality=88, method=6)
+        out_bytes = out_memory.getvalue()
+        
+        with open(output_path, "wb") as f:
+            f.write(out_bytes)
     memory.close()
+
+    blob_token = os.getenv("BLOB_READ_WRITE_TOKEN")
+    if blob_token:
+        try:
+            blob_response = requests.put(
+                f"https://blob.vercel-storage.com/games/{slug}.webp",
+                data=out_bytes,
+                headers={
+                    "Authorization": f"Bearer {blob_token}",
+                    "x-api-version": "7"
+                },
+                timeout=30
+            )
+            blob_response.raise_for_status()
+            return blob_response.json().get("url", f"/games/{slug}.webp")
+        except Exception as exc:
+            print(f"[{now_iso()}] Vercel Blob upload failed: {exc}")
 
     return f"/games/{slug}.webp"
 

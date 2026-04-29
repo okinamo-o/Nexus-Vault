@@ -19,6 +19,10 @@ model Game {
   updatedAt     DateTime       @updatedAt
 
   downloadLinks DownloadLink[]
+
+  @@index([isActive])
+  @@index([createdAt])
+  @@index([updatedAt])
 }
 
 model DownloadLink {
@@ -31,4 +35,10 @@ model DownloadLink {
   createdAt DateTime @default(now())
 
   @@index([gameId])
+}
+
+model SiteStat {
+  key       String   @id
+  value     Int      @default(0)
+  updatedAt DateTime @updatedAt
 }

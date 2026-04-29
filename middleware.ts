@@ -29,6 +29,15 @@ function decodeBasicAuthHeader(headerValue: string): { username: string; passwor
   }
 }
 
+function secureCompare(a: string, b: string) {
+  if (a.length !== b.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.length; ++i) {
+    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return mismatch === 0;
+}
+
 export function middleware(request: NextRequest) {
   const expectedUsername = process.env.ADMIN_USERNAME;
   const expectedPassword = process.env.ADMIN_PASSWORD;
@@ -44,8 +53,8 @@ export function middleware(request: NextRequest) {
   const credentials = decodeBasicAuthHeader(authHeader);
   if (!credentials) return unauthorizedResponse();
 
-  const isValidUser = credentials.username === expectedUsername;
-  const isValidPassword = credentials.password === expectedPassword;
+  const isValidUser = secureCompare(credentials.username, expectedUsername);
+  const isValidPassword = secureCompare(credentials.password, expectedPassword);
   if (!isValidUser || !isValidPassword) return unauthorizedResponse();
 
   return NextResponse.next();
