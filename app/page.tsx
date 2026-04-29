@@ -33,6 +33,7 @@ export default async function HomePage({ searchParams }: HomePageProps) {
 
   const rawQuery = searchParams?.q;
   const query = typeof rawQuery === "string" ? rawQuery.trim() : "";
+  const searchTerms = query.split(/\s+/).filter(Boolean);
   const sort = typeof searchParams?.sort === "string" ? searchParams.sort : "newest";
   const requireSpecs = searchParams?.req === "1";
   const requireMirrors = searchParams?.mirrors === "1";
@@ -42,9 +43,14 @@ export default async function HomePage({ searchParams }: HomePageProps) {
       isActive: true,
       ...(requireSpecs ? { requirements: { not: null } } : {}),
       ...(requireMirrors ? { downloadLinks: { some: {} } } : {}),
-      ...(query
+      ...(searchTerms.length > 0
         ? {
-            OR: [{ title: { contains: query } }, { description: { contains: query } }],
+            AND: searchTerms.map((term) => ({
+              OR: [
+                { title: { contains: term, mode: "insensitive" } },
+                { description: { contains: term, mode: "insensitive" } },
+              ],
+            })),
           }
         : {}),
     },

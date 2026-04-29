@@ -75,13 +75,18 @@ export async function GET(request: NextRequest) {
     return NextResponse.json<Suggestion[]>([]);
   }
 
+  const searchTerms = q.split(/\s+/).filter(Boolean);
+
   const candidates = await prisma.game.findMany({
     where: {
       isActive: true,
-      title: {
-        contains: q,
-        mode: "insensitive",
-      },
+      ...(searchTerms.length > 0
+        ? {
+            AND: searchTerms.map((term) => ({
+              title: { contains: term, mode: "insensitive" },
+            })),
+          }
+        : {}),
     },
     select: {
       title: true,
