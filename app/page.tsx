@@ -158,13 +158,15 @@ export default async function HomePage({ searchParams }: HomePageProps) {
                 <Link
                   key={game.id}
                   href={`/game/${game.slug}`}
-                  className="flex items-center justify-between rounded-lg border border-border/50 px-3 py-2 text-sm hover:border-primary/50"
+                  className="flex items-center justify-between gap-2 rounded-lg border border-border/50 px-3 py-2 text-sm hover:border-primary/50"
                 >
-                  <span className="line-clamp-1">
+                  <span className="line-clamp-1 flex-1 min-w-0">
                     <span className="mr-2 text-muted-foreground">#{index + 1}</span>
                     {game.title}
                   </span>
-                  <Badge variant="outline">{game._count.downloadLinks} mirrors</Badge>
+                  <Badge variant="outline" className="shrink-0 whitespace-nowrap">
+                    {game._count.downloadLinks} mirrors
+                  </Badge>
                 </Link>
               ))}
             </CardContent>
