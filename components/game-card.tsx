@@ -14,10 +14,21 @@ type GameCardProps = {
     description: string;
     imagePath: string;
     requirements: unknown;
+    createdAt?: Date;
+    updatedAt?: Date;
   };
 };
 
 export function GameCard({ game }: GameCardProps) {
+  const now = Date.now();
+  const createdAtMs = game.createdAt ? game.createdAt.getTime() : null;
+  const updatedAtMs = game.updatedAt ? game.updatedAt.getTime() : null;
+
+  const isNewEntry =
+    createdAtMs !== null && now - createdAtMs < 7 * 24 * 60 * 60 * 1000;
+  const isRecentlyUpdated =
+    !isNewEntry && updatedAtMs !== null && now - updatedAtMs < 3 * 24 * 60 * 60 * 1000;
+
   const requirements = requirementsToRows(normalizeRequirements(game.requirements)).slice(0, 2);
   const imagePath = game.imagePath
     ? game.imagePath.startsWith("/")
@@ -40,11 +51,13 @@ export function GameCard({ game }: GameCardProps) {
             sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 25vw"
             className="object-cover transition duration-500 group-hover:scale-[1.07]"
           />
-          <div className="absolute bottom-3 left-3 z-20">
-            <Badge variant="default" className="uppercase">
-              New Entry
-            </Badge>
-          </div>
+          {(isNewEntry || isRecentlyUpdated) && (
+            <div className="absolute bottom-3 left-3 z-20">
+              <Badge variant="default" className="uppercase">
+                {isNewEntry ? "New Entry" : "Updated"}
+              </Badge>
+            </div>
+          )}
         </div>
         <CardHeader className="pb-2">
           <CardTitle className="line-clamp-2 text-base text-slate-100">{game.title}</CardTitle>

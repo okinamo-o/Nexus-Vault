@@ -1,22 +1,21 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 type Props = {
   currentSort: string;
   requireSpecs: boolean;
   requireMirrors: boolean;
-  query: string;
 };
 
 export function HomeSearchFilters({
   currentSort,
   requireSpecs,
   requireMirrors,
-  query,
 }: Props) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [sort, setSort] = React.useState(currentSort);
   const [req, setReq] = React.useState(requireSpecs);
   const [mirrors, setMirrors] = React.useState(requireMirrors);
@@ -29,7 +28,7 @@ export function HomeSearchFilters({
 
   function pushNextParams(next: { sort?: string; req?: boolean; mirrors?: boolean }) {
     const params = new URLSearchParams();
-    const q = query.trim();
+    const q = searchParams.get("q")?.trim() ?? "";
     if (q) params.set("q", q);
 
     const nextSort = next.sort ?? sort;

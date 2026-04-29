@@ -62,6 +62,16 @@ export default async function GameDetailPage({ params }: GameDetailProps) {
       : `/games/${game.imagePath}`
     : "/window.svg";
 
+  const now = Date.now();
+  const createdAtMs = game.createdAt ? game.createdAt.getTime() : null;
+  const updatedAtMs = game.updatedAt ? game.updatedAt.getTime() : null;
+
+  const isNewEntry = createdAtMs !== null && now - createdAtMs < 7 * 24 * 60 * 60 * 1000;
+  const isRecentlyUpdated =
+    !isNewEntry && updatedAtMs !== null && now - updatedAtMs < 3 * 24 * 60 * 60 * 1000;
+
+  const badgeText = isNewEntry ? "New Entry" : isRecentlyUpdated ? "Updated" : "Archive Entry";
+
   return (
     <main className="min-h-screen py-10 md:py-14">
       <section className="container max-w-5xl space-y-6">
@@ -91,7 +101,7 @@ export default async function GameDetailPage({ params }: GameDetailProps) {
 
           <div className="space-y-8 p-6 md:p-10">
             <header className="space-y-4">
-              <Badge className="uppercase">Editorial Entry</Badge>
+              <Badge className="uppercase">{badgeText}</Badge>
               <h1 className="font-heading text-3xl font-bold leading-tight md:text-5xl">
                 {game.title}
               </h1>

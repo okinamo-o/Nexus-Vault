@@ -65,6 +65,8 @@ export default async function HomePage({ searchParams }: HomePageProps) {
     },
   });
 
+  const totalMatched = allGames.length;
+
   const games = [...allGames]
     .sort((a, b) => {
       if (sort === "az") return a.title.localeCompare(b.title);
@@ -126,7 +128,6 @@ export default async function HomePage({ searchParams }: HomePageProps) {
                 currentSort={sort}
                 requireSpecs={requireSpecs}
                 requireMirrors={requireMirrors}
-                query={query}
               />
             </form>
           </div>
@@ -137,7 +138,7 @@ export default async function HomePage({ searchParams }: HomePageProps) {
             Fresh Drops
           </h2>
           <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
-            {games.length} entries
+            {games.length} entries{totalMatched !== games.length ? ` / ${totalMatched}` : ""}
           </p>
         </div>
 

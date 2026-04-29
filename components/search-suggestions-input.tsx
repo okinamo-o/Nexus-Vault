@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 import { Input } from "@/components/ui/input";
 
@@ -17,6 +17,8 @@ async function fetchSuggestions(query: string, signal: AbortSignal): Promise<Sug
 }
 
 export function SearchSuggestionsInput({ initialValue }: { initialValue: string }) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [value, setValue] = React.useState(initialValue);
   const [suggestions, setSuggestions] = React.useState<Suggestion[]>([]);
   const [open, setOpen] = React.useState(false);
@@ -125,6 +127,9 @@ export function SearchSuggestionsInput({ initialValue }: { initialValue: string 
                   // The user can then press Enter or click "Search Archive" so sorting/filtering work.
                   setValue(s.title);
                   close();
+                  const params = new URLSearchParams(searchParams);
+                  params.set("q", s.title.trim());
+                  router.replace(`/?${params.toString()}`);
                 }}
               >
                 {s.title}
