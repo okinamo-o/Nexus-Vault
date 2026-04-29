@@ -4,10 +4,10 @@ import Link from "next/link";
 
 import { GameCard } from "@/components/game-card";
 import { SiteLogo } from "@/components/site-logo";
-import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { SearchSuggestionsInput } from "@/components/search-suggestions-input";
 import { prisma } from "@/lib/prisma";
 import { incrementVisitorCounter } from "@/lib/visitor-counter";
 
@@ -115,13 +115,7 @@ export default async function HomePage({ searchParams }: HomePageProps) {
               </label>
               <div className="relative flex-1">
                 <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  id="q"
-                  name="q"
-                  defaultValue={query}
-                  placeholder="Search by title or description..."
-                  className="pl-9"
-                />
+                <SearchSuggestionsInput initialValue={query} />
               </div>
               <Button type="submit" className="md:min-w-44">
                 Search Archive
