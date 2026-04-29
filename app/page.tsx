@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SearchSuggestionsInput } from "@/components/search-suggestions-input";
+import { HomeSearchFilters } from "@/components/home-search-filters";
 import { prisma } from "@/lib/prisma";
 import { incrementVisitorCounter } from "@/lib/visitor-counter";
 
@@ -121,26 +122,12 @@ export default async function HomePage({ searchParams }: HomePageProps) {
                 Search Archive
               </Button>
               </div>
-              <div className="grid gap-3 sm:grid-cols-3">
-                <select
-                  name="sort"
-                  defaultValue={sort}
-                  className="h-11 rounded-xl border border-input/80 bg-background/55 px-3 text-sm text-foreground"
-                >
-                  <option value="newest">Sort: Newest</option>
-                  <option value="updated">Sort: Recently Updated</option>
-                  <option value="mirrors">Sort: Most Mirrors</option>
-                  <option value="az">Sort: A-Z</option>
-                </select>
-                <label className="flex items-center gap-2 rounded-xl border border-input/70 bg-background/45 px-3 text-sm">
-                  <input type="checkbox" name="req" value="1" defaultChecked={requireSpecs} />
-                  Specs only
-                </label>
-                <label className="flex items-center gap-2 rounded-xl border border-input/70 bg-background/45 px-3 text-sm">
-                  <input type="checkbox" name="mirrors" value="1" defaultChecked={requireMirrors} />
-                  Mirrors only
-                </label>
-              </div>
+              <HomeSearchFilters
+                currentSort={sort}
+                requireSpecs={requireSpecs}
+                requireMirrors={requireMirrors}
+                query={query}
+              />
             </form>
           </div>
         </div>
