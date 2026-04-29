@@ -11,6 +11,7 @@ import { SearchSuggestionsInput } from "@/components/search-suggestions-input";
 import { HomeSearchFilters } from "@/components/home-search-filters";
 import { prisma } from "@/lib/prisma";
 import { incrementVisitorCounter } from "@/lib/visitor-counter";
+import AdBanner from "@/components/ad-banner";
 
 export const metadata: Metadata = {
   title: "Nexus Vault",
@@ -153,6 +154,7 @@ export default async function HomePage({ searchParams }: HomePageProps) {
               />
             </form>
           </div>
+          <AdBanner />
         </div>
 
         <div className="mb-5 flex items-center justify-between">

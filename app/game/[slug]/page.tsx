@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { normalizeDownloadLinks, normalizeRequirements, requirementsToRows } from "@/lib/game-data";
 import { prisma } from "@/lib/prisma";
+import AdBanner from "@/components/ad-banner";
 
 type GameDetailProps = {
   params: {
@@ -153,6 +154,8 @@ export default async function GameDetailPage({ params }: GameDetailProps) {
                 </CardContent>
               </Card>
             </section>
+
+            <AdBanner />
 
             <section className="grid gap-5 md:grid-cols-2">
               <Card className="gaming-glow bg-background/55">
