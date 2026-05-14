@@ -908,6 +908,13 @@ async def run_scraper(limit: int, dry_run: bool, rotate_every: int) -> None:
                     failed += 1
                     continue
 
+                # Skip error pages that were scraped as if they were real games
+                error_keywords = ["error code", "server error", "gateway time", "access denied", "page not found"]
+                if any(kw in scraped.title.lower() for kw in error_keywords):
+                    print(f"[{now_iso()}] Skipping error page: '{scraped.title}'")
+                    failed += 1
+                    continue
+
                 print(
                     f"[{now_iso()}] Parsed: title='{scraped.title}', slug='{scraped.slug}', "
                     f"links={len(scraped.download_links)}"
