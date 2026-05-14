@@ -31,9 +31,11 @@ export function GameCard({ game }: GameCardProps) {
 
   const requirements = requirementsToRows(normalizeRequirements(game.requirements)).slice(0, 2);
   const imagePath = game.imagePath
-    ? game.imagePath.startsWith("/")
+    ? game.imagePath.startsWith("http")
       ? game.imagePath
-      : `/games/${game.imagePath}`
+      : game.imagePath.startsWith("/")
+        ? game.imagePath
+        : `/games/${game.imagePath}`
     : "/window.svg";
   const shortDescription =
     game.description.length > 140 ? `${game.description.slice(0, 137).trim()}...` : game.description;

@@ -58,9 +58,11 @@ export default async function GameDetailPage({ params }: GameDetailProps) {
     .filter(Boolean)
     .slice(0, 4);
   const imagePath = game.imagePath
-    ? game.imagePath.startsWith("/")
+    ? game.imagePath.startsWith("http")
       ? game.imagePath
-      : `/games/${game.imagePath}`
+      : game.imagePath.startsWith("/")
+        ? game.imagePath
+        : `/games/${game.imagePath}`
     : "/window.svg";
 
   const now = Date.now();
