@@ -1,15 +1,21 @@
 import type { Metadata } from "next";
-import Image from "next/image";
 import Link from "next/link";
 import { ArrowLeft, ExternalLink } from "lucide-react";
 import { notFound } from "next/navigation";
 
+import AdBanner from "@/components/ad-banner";
+import { GameImage } from "@/components/game-image";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { normalizeDownloadLinks, normalizeRequirements, requirementsToRows } from "@/lib/game-data";
+import {
+  getGameStatusBadge,
+  getSlugLookupCandidates,
+  normalizeDownloadLinks,
+  normalizeRequirements,
+  requirementsToRows,
+} from "@/lib/game-data";
 import { prisma } from "@/lib/prisma";
-import AdBanner from "@/components/ad-banner";
 
 type GameDetailProps = {
   params: {
@@ -20,8 +26,12 @@ type GameDetailProps = {
 export const dynamic = "force-dynamic";
 
 export async function generateMetadata({ params }: GameDetailProps): Promise<Metadata> {
-  const game = await prisma.game.findUnique({
-    where: { slug: params.slug },
+  const slugCandidates = getSlugLookupCandidates(params.slug);
+  const game = await prisma.game.findFirst({
+    where: {
+      slug: { in: slugCandidates },
+      isActive: true,
+    },
     select: { title: true, description: true },
   });
 
@@ -36,9 +46,10 @@ export async function generateMetadata({ params }: GameDetailProps): Promise<Met
 }
 
 export default async function GameDetailPage({ params }: GameDetailProps) {
+  const slugCandidates = getSlugLookupCandidates(params.slug);
   const game = await prisma.game.findFirst({
     where: {
-      slug: params.slug,
+      slug: { in: slugCandidates },
       isActive: true,
     },
     include: {
@@ -57,23 +68,8 @@ export default async function GameDetailPage({ params }: GameDetailProps) {
     .map((line) => line.trim())
     .filter(Boolean)
     .slice(0, 4);
-  const imagePath = game.imagePath
-    ? game.imagePath.startsWith("http")
-      ? game.imagePath
-      : game.imagePath.startsWith("/")
-        ? game.imagePath
-        : `/games/${game.imagePath}`
-    : "/window.svg";
 
-  const now = Date.now();
-  const createdAtMs = game.createdAt ? game.createdAt.getTime() : null;
-  const updatedAtMs = game.updatedAt ? game.updatedAt.getTime() : null;
-
-  const isNewEntry = createdAtMs !== null && now - createdAtMs < 7 * 24 * 60 * 60 * 1000;
-  const isRecentlyUpdated =
-    !isNewEntry && updatedAtMs !== null && now - updatedAtMs < 3 * 24 * 60 * 60 * 1000;
-
-  const badgeText = isNewEntry ? "New Entry" : isRecentlyUpdated ? "Updated" : "Archive Entry";
+  const badgeText = getGameStatusBadge(game.createdAt, game.updatedAt) ?? "Archive Entry";
 
   return (
     <main className="min-h-screen py-10 md:py-14">
@@ -92,8 +88,8 @@ export default async function GameDetailPage({ params }: GameDetailProps) {
         <article className="gaming-surface overflow-hidden rounded-3xl border-border/70">
           <div className="relative aspect-[16/8] w-full bg-secondary">
             <div className="absolute inset-0 z-10 bg-gradient-to-t from-background via-background/20 to-transparent" />
-            <Image
-              src={imagePath}
+            <GameImage
+              src={game.imagePath}
               alt={game.title}
               fill
               priority
@@ -144,13 +140,17 @@ export default async function GameDetailPage({ params }: GameDetailProps) {
                   <p className="flex items-center justify-between gap-4">
                     <span className="text-muted-foreground">Added</span>
                     <span className="font-semibold text-foreground">
-                      {new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(game.createdAt)}
+                      {new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(
+                        game.createdAt
+                      )}
                     </span>
                   </p>
                   <p className="flex items-center justify-between gap-4">
                     <span className="text-muted-foreground">Updated</span>
                     <span className="font-semibold text-foreground">
-                      {new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(game.updatedAt)}
+                      {new Intl.DateTimeFormat("en-US", { dateStyle: "medium" }).format(
+                        game.updatedAt
+                      )}
                     </span>
                   </p>
                 </CardContent>
@@ -219,7 +219,9 @@ export default async function GameDetailPage({ params }: GameDetailProps) {
                 </CardHeader>
                 <CardContent className="grid gap-3 text-sm sm:grid-cols-2">
                   <div className="rounded-xl border border-border/60 bg-background/40 p-3">
-                    <p className="text-xs uppercase tracking-wider text-muted-foreground">Entry Created</p>
+                    <p className="text-xs uppercase tracking-wider text-muted-foreground">
+                      Entry Created
+                    </p>
                     <p className="mt-1 font-semibold text-foreground">
                       {new Intl.DateTimeFormat("en-US", {
                         dateStyle: "medium",
@@ -228,7 +230,9 @@ export default async function GameDetailPage({ params }: GameDetailProps) {
                     </p>
                   </div>
                   <div className="rounded-xl border border-border/60 bg-background/40 p-3">
-                    <p className="text-xs uppercase tracking-wider text-muted-foreground">Latest Sync</p>
+                    <p className="text-xs uppercase tracking-wider text-muted-foreground">
+                      Latest Sync
+                    </p>
                     <p className="mt-1 font-semibold text-foreground">
                       {new Intl.DateTimeFormat("en-US", {
                         dateStyle: "medium",

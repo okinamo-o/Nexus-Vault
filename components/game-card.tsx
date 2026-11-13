@@ -1,10 +1,15 @@
-import Image from "next/image";
 import Link from "next/link";
 import { ChevronRight } from "lucide-react";
 
-import { normalizeRequirements, requirementsToRows } from "@/lib/game-data";
+import { GameImage } from "@/components/game-image";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  encodeGameSlugPath,
+  getGameStatusBadge,
+  normalizeRequirements,
+  requirementsToRows,
+} from "@/lib/game-data";
 
 type GameCardProps = {
   game: {
@@ -14,49 +19,36 @@ type GameCardProps = {
     description: string;
     imagePath: string;
     requirements: unknown;
-    createdAt?: Date;
-    updatedAt?: Date;
+    createdAt?: Date | string;
+    updatedAt?: Date | string;
   };
 };
 
 export function GameCard({ game }: GameCardProps) {
-  const now = Date.now();
-  const createdAtMs = game.createdAt ? game.createdAt.getTime() : null;
-  const updatedAtMs = game.updatedAt ? game.updatedAt.getTime() : null;
-
-  const isNewEntry =
-    createdAtMs !== null && now - createdAtMs < 7 * 24 * 60 * 60 * 1000;
-  const isRecentlyUpdated =
-    !isNewEntry && updatedAtMs !== null && now - updatedAtMs < 3 * 24 * 60 * 60 * 1000;
-
+  const statusBadge = getGameStatusBadge(game.createdAt, game.updatedAt);
   const requirements = requirementsToRows(normalizeRequirements(game.requirements)).slice(0, 2);
-  const imagePath = game.imagePath
-    ? game.imagePath.startsWith("http")
-      ? game.imagePath
-      : game.imagePath.startsWith("/")
-        ? game.imagePath
-        : `/games/${game.imagePath}`
-    : "/window.svg";
   const shortDescription =
-    game.description.length > 140 ? `${game.description.slice(0, 137).trim()}...` : game.description;
+    game.description.length > 140
+      ? `${game.description.slice(0, 137).trim()}...`
+      : game.description;
 
   return (
-    <Link href={`/game/${game.slug}`} className="group gaming-glow block h-full">
+    <Link href={encodeGameSlugPath(game.slug)} className="group gaming-glow block h-full">
       <Card className="h-full overflow-hidden border-border/70 bg-card/80 transition-all duration-300 hover:-translate-y-1 hover:border-primary/60">
         <div className="relative aspect-[16/9] overflow-hidden bg-secondary/70">
           <div className="absolute inset-0 z-10 bg-gradient-to-t from-background/85 via-background/10 to-transparent" />
-          <Image
-            src={imagePath}
+          <GameImage
+            src={game.imagePath}
             alt={game.title}
             fill
             loading="lazy"
             sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 25vw"
             className="object-cover transition duration-500 group-hover:scale-[1.07]"
           />
-          {(isNewEntry || isRecentlyUpdated) && (
+          {statusBadge && (
             <div className="absolute bottom-3 left-3 z-20">
               <Badge variant="default" className="uppercase">
-                {isNewEntry ? "New Entry" : "Updated"}
+                {statusBadge}
               </Badge>
             </div>
           )}

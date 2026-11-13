@@ -28,7 +28,8 @@ export function HomeSearchFilters({
 
   function pushNextParams(next: { sort?: string; req?: boolean; mirrors?: boolean }) {
     const params = new URLSearchParams();
-    const q = searchParams.get("q")?.trim() ?? "";
+    const inputEl = document.querySelector<HTMLInputElement>("#q");
+    const q = (inputEl ? inputEl.value : searchParams.get("q") ?? "").trim();
     if (q) params.set("q", q);
 
     const nextSort = next.sort ?? sort;
@@ -93,4 +94,3 @@ export function HomeSearchFilters({
     </div>
   );
 }
-

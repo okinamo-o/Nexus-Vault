@@ -2,19 +2,34 @@ name: Auto-Scraper
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # Every 6 hours
-  workflow_dispatch: # Allow manual trigger
+    - cron: "0 */6 * * *" # Every 6 hours
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Crawl mode: latest (homepage feed) or all (games-list)"
+        required: false
+        default: "latest"
+        type: choice
+        options:
+          - latest
+          - all
+      limit:
+        description: "Max games to scrape (0 = unlimited)"
+        required: false
+        default: "20"
+        type: string
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -28,5 +43,9 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
-          SCRAPER_LIMIT: 20 # Limit to 20 newest games per run to save time
-        run: python scraper/main.py --limit $SCRAPER_LIMIT
+          SCRAPER_LIMIT: "20"
+          SCRAPER_MODE: "latest"
+        run: |
+          MODE="${{ github.event.inputs.mode }}"
+          LIMIT="${{ github.event.inputs.limit }}"
+          python scraper/main.py --mode "${MODE:-$SCRAPER_MODE}" --limit "${LIMIT:-$SCRAPER_LIMIT}"

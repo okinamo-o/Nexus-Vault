@@ -1,11 +1,13 @@
 import argparse
 import asyncio
+import html as html_lib
 import json
 import os
 import random
 import re
 import sqlite3
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from io import BytesIO
@@ -22,11 +24,13 @@ from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 from playwright_stealth import Stealth
 from psycopg.rows import dict_row
 
+SOURCE_HOME_URL = "https://steamrip.com/"
 SOURCE_LIST_URL = "https://steamrip.com/games-list/"
 SOURCE_DOMAIN = "steamrip.com"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_GAMES_DIR = PROJECT_ROOT / "public" / "games"
 DEFAULT_DB_PATH = PROJECT_ROOT / "prisma" / "dev.db"
+FALLBACK_IMAGE_PATH = "/window.svg"
 
 USER_AGENTS = [
     # Chrome 130+
@@ -43,6 +47,63 @@ USER_AGENTS = [
 
 BANNED_TERMS_RE = re.compile(
     r"(?i)\b(steamrip(?:\.com)?|discord|telegram|cracked by)\b"
+)
+
+INTRO_BOILERPLATE_RES = [
+    re.compile(
+        r"^(?:get\s+[^\n.!?]{1,90}?\s+(?:(?:pc\s+)?game\s+)?)?for\s+free\s+instantly\s+and\s+play\s+pre-installed\s+on\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^[^\n.!?]{1,90}?\s+game\s+for\s+free\s+instantly\s+and\s+play\s+pre-installed\s+on\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^[^\n.!?]{1,90}?\s+download\s+pc\s+game\s+in\s+direct\s+link\s+for\s+free\s+on\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^[^\n.!?]{1,90}?\s+pc\s+free\s+download\s+game\s+direct\s+link,[^\n]{0,120}?for\s+free\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^[^\n.!?]{1,90}?\s+(?:pc\s+)?free\s+download(?:\s+direct\s+link)?(?:\s*\(v[\d\w.\- ]+\))?\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^[^\n.!?]{1,90}?\s+download\s+direct\s+link\s*",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^[^\n.!?]{1,90}?\s+directly\s+download\s*",
+        re.IGNORECASE,
+    ),
+]
+
+INVALID_TITLE_EXACT = {
+    "steamrip.com",
+    "www.steamrip.com",
+    "just a moment...",
+    "just a moment",
+    "attention required!",
+    "attention required",
+    "access denied",
+    "403 forbidden",
+    "404 not found",
+}
+
+INVALID_TITLE_SUBSTRINGS = (
+    "error code",
+    "internal server error",
+    "gateway time-out",
+    "gateway timeout",
+    "bad gateway",
+    "service unavailable",
+    "checking your browser",
+    "checking if the site connection is secure",
+    "verify you are human",
+    "attention required! | cloudflare",
+    "page not found",
 )
 
 REQUIREMENT_KEY_MAP = {
@@ -81,9 +142,29 @@ BLOCKED_HOST_TOKENS = {
     "googlesyndication.com",
     "doubleclick.net",
     "llvpn.com",
+    "steamusercontent.com",
+    "steamstatic.com",
+    "steampowered.com",
+    "steamcommunity.com",
+    "media-amazon.com",
+    "imgur.com",
+    "youtube.com",
+    "youtu.be",
+    "github.com",
+    "wikipedia.org",
+    "support.",
+    "internetdownloadmanager.com",
+    "cloudflare.com",
+    "twitch.tv",
+    "instagram.com",
+    "tiktok.com",
+    "epicgames.com",
+    "gog.com",
+    "xbox.com",
+    "playstation.com",
 }
 
-IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".svg")
+IMAGE_SUFFIXES = (".jpg", ".jpeg", ".jpgg", ".png", ".webp", ".gif", ".bmp", ".svg", ".avif")
 STEALTH = Stealth()
 
 
@@ -180,6 +261,15 @@ def init_db_schema(conn, config: DbConfig) -> None:
               FOREIGN KEY ("gameId") REFERENCES "Game" ("id") ON DELETE CASCADE ON UPDATE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS "SiteStat" (
+              "key" TEXT NOT NULL PRIMARY KEY,
+              "value" INTEGER NOT NULL DEFAULT 0,
+              "updatedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS "Game_isActive_idx" ON "Game" ("isActive");
+            CREATE INDEX IF NOT EXISTS "Game_createdAt_idx" ON "Game" ("createdAt");
+            CREATE INDEX IF NOT EXISTS "Game_updatedAt_idx" ON "Game" ("updatedAt");
             CREATE INDEX IF NOT EXISTS "DownloadLink_gameId_idx" ON "DownloadLink" ("gameId");
             """
         )
@@ -215,13 +305,28 @@ def init_db_schema(conn, config: DbConfig) -> None:
             """
         )
         cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS "SiteStat" (
+              "key" TEXT PRIMARY KEY,
+              "value" INTEGER NOT NULL DEFAULT 0,
+              "updatedAt" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cursor.execute('CREATE INDEX IF NOT EXISTS "Game_isActive_idx" ON "Game" ("isActive")')
+        cursor.execute('CREATE INDEX IF NOT EXISTS "Game_createdAt_idx" ON "Game" ("createdAt")')
+        cursor.execute('CREATE INDEX IF NOT EXISTS "Game_updatedAt_idx" ON "Game" ("updatedAt")')
+        cursor.execute(
             'CREATE INDEX IF NOT EXISTS "DownloadLink_gameId_idx" ON "DownloadLink" ("gameId")'
         )
     conn.commit()
 
 
 def slugify(value: str) -> str:
-    lowered = value.strip().lower()
+    ascii_text = (
+        unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    )
+    lowered = ascii_text.strip().lower()
     lowered = re.sub(r"[^\w\s-]", "", lowered)
     lowered = re.sub(r"[\s_]+", "-", lowered)
     lowered = re.sub(r"-{2,}", "-", lowered)
@@ -229,17 +334,75 @@ def slugify(value: str) -> str:
 
 
 def normalize_game_title(raw_title: str) -> str:
-    title = raw_title.strip()
+    title = html_lib.unescape(raw_title).strip()
     title = re.sub(r"\s*free\s+download.*$", "", title, flags=re.IGNORECASE)
     title = re.sub(r"\s*\(v[\d\w.\- ]+\)\s*$", "", title, flags=re.IGNORECASE)
     return title.strip() or raw_title.strip()
 
 
-def sanitize_text(text: str) -> str:
-    cleaned = BANNED_TERMS_RE.sub("", text)
-    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+BOILERPLATE_SUFFIX_RE = re.compile(
+    r"^(?:[\s:\-–]+)?(?:"
+    r"(?:pc\s+)?game\s+for\s+free\s+instantly\s+and\s+play\s+pre-installed\s+on|"
+    r"for\s+free\s+instantly\s+and\s+play\s+pre-installed\s+on|"
+    r"download\s+pc\s+game\s+in\s+direct\s+link\s+for\s+free\s+on|"
+    r"pc\s+free\s+download\s+game\s+direct\s+link,[^\n]{0,120}?for\s+free|"
+    r"(?:pc\s+)?free\s+download(?:\s+direct\s+link)?(?:\s*\(v[\d\w.\- ]+\))?|"
+    r"download\s+direct\s+link|"
+    r"directly\s+download"
+    r")\s*",
+    re.IGNORECASE,
+)
+
+
+def strip_intro_boilerplate(text: str, title: str | None = None) -> str:
+    cleaned = text.strip()
+    # Apply up to two passes since pages occasionally stack "Get ... pre-installed on" + "<Title> Free Download".
+    for _ in range(2):
+        before = cleaned
+        if title:
+            title_prefix = re.compile(
+                rf"^(?:get\s+)?{re.escape(title.strip())}\s*",
+                re.IGNORECASE,
+            )
+            match = title_prefix.match(cleaned)
+            if match:
+                rest = cleaned[match.end() :]
+                suffix_match = BOILERPLATE_SUFFIX_RE.match(rest)
+                if suffix_match:
+                    candidate = rest[suffix_match.end() :].strip()
+                    if candidate and len(candidate) >= 20:
+                        cleaned = candidate
+                        continue
+
+        for pattern in INTRO_BOILERPLATE_RES:
+            candidate = pattern.sub("", cleaned, count=1).strip()
+            if candidate and len(candidate) >= 20:
+                cleaned = candidate
+        if cleaned == before:
+            break
+    return cleaned
+
+
+def sanitize_text(text: str, title: str | None = None) -> str:
+    cleaned = html_lib.unescape(text)
+    cleaned = BANNED_TERMS_RE.sub("", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = strip_intro_boilerplate(cleaned, title=title)
     return cleaned.strip()
+
+
+def is_invalid_scraped_page(title: str, description: str, link_count: int) -> str | None:
+    lowered_title = title.strip().lower()
+    if not lowered_title or lowered_title in INVALID_TITLE_EXACT:
+        return f"blocked title '{title}'"
+    if any(token in lowered_title for token in INVALID_TITLE_SUBSTRINGS):
+        return f"error/challenge title '{title}'"
+    if lowered_title.endswith((".com", ".net", ".org")) and len(lowered_title) <= 30:
+        return f"domain-only title '{title}'"
+    if len(description.strip()) < 30 and link_count == 0:
+        return f"empty/challenge content for '{title}'"
+    return None
 
 
 def rewrite_with_ollama(sanitized_text: str) -> str | None:
@@ -279,17 +442,17 @@ def rewrite_with_ollama(sanitized_text: str) -> str | None:
     return None
 
 
-def rewrite_description(raw_text: str) -> str:
+def rewrite_description(raw_text: str, title: str | None = None) -> str:
     if not raw_text:
         return ""
 
     # Primary method for local beta: regex sanitization.
-    sanitized = sanitize_text(raw_text)
+    sanitized = sanitize_text(raw_text, title=title)
 
     # Optional local LLM hook via Ollama.
     ollama_rewrite = rewrite_with_ollama(sanitized)
     if ollama_rewrite:
-        return sanitize_text(ollama_rewrite)
+        return sanitize_text(ollama_rewrite, title=title)
     return sanitized
 
 
@@ -307,7 +470,7 @@ def extract_article_body_from_schema(soup: BeautifulSoup) -> str:
     if not isinstance(article_body, str):
         return ""
 
-    normalized = article_body.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = html_lib.unescape(article_body).replace("\r\n", "\n").replace("\r", "\n")
     lines = [line.strip() for line in normalized.split("\n") if line.strip()]
     if not lines:
         return ""
@@ -336,7 +499,7 @@ def extract_description_from_entry(soup: BeautifulSoup) -> str:
         if not isinstance(child, Tag):
             continue
 
-        text = child.get_text(" ", strip=True)
+        text = html_lib.unescape(child.get_text(" ", strip=True))
         if not text:
             continue
 
@@ -376,7 +539,7 @@ def parse_requirements(soup: BeautifulSoup) -> dict[str, str]:
         return result
 
     for item in requirement_list.find_all("li", recursive=False):
-        text = item.get_text(" ", strip=True)
+        text = html_lib.unescape(item.get_text(" ", strip=True))
         if not text:
             continue
 
@@ -459,6 +622,8 @@ def is_intermediate_source_link(url: str) -> bool:
 
 def should_skip_url(url: str) -> bool:
     parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return True
     if host_matches_blocklist(parsed.hostname):
         return not is_intermediate_source_link(url)
 
@@ -490,6 +655,10 @@ def extract_candidate_links(soup: BeautifulSoup, page_url: str) -> list[str]:
 
     candidates: list[str] = []
     for anchor in entry.select("a[href]"):
+        # Skip thumbnail/screenshot links wrapping images.
+        if anchor.find("img") is not None:
+            continue
+
         href = (anchor.get("href") or "").strip()
         if not href or not looks_like_download_href(href):
             continue
@@ -585,10 +754,8 @@ def download_and_convert_image(
     image_url: str | None,
     slug: str,
 ) -> str:
-    PUBLIC_GAMES_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = PUBLIC_GAMES_DIR / f"{slug}.webp"
     if not image_url:
-        return f"/games/{slug}.webp"
+        return ""
 
     try:
         response = session.get(
@@ -597,19 +764,21 @@ def download_and_convert_image(
             timeout=35,
         )
         response.raise_for_status()
-    except requests.RequestException:
-        return f"/games/{slug}.webp"
+    except requests.RequestException as exc:
+        print(f"[{now_iso()}] Image download failed for '{slug}': {exc}")
+        return ""
 
-    with Image.open(memory := BytesIO(response.content)) as image:
-        if image.mode not in {"RGB", "RGBA"}:
-            image = image.convert("RGB")
-        out_memory = BytesIO()
-        image.save(out_memory, "WEBP", quality=88, method=6)
-        out_bytes = out_memory.getvalue()
-        
-        with open(output_path, "wb") as f:
-            f.write(out_bytes)
-    memory.close()
+    try:
+        with Image.open(memory := BytesIO(response.content)) as image:
+            if image.mode not in {"RGB", "RGBA"}:
+                image = image.convert("RGB")
+            out_memory = BytesIO()
+            image.save(out_memory, "WEBP", quality=88, method=6)
+            out_bytes = out_memory.getvalue()
+        memory.close()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{now_iso()}] Image conversion failed for '{slug}': {exc}")
+        return ""
 
     blob_token = os.getenv("BLOB_READ_WRITE_TOKEN")
     if blob_token:
@@ -619,14 +788,21 @@ def download_and_convert_image(
                 data=out_bytes,
                 headers={
                     "Authorization": f"Bearer {blob_token}",
-                    "x-api-version": "7"
+                    "x-api-version": "7",
                 },
-                timeout=30
+                timeout=30,
             )
             blob_response.raise_for_status()
-            return blob_response.json().get("url", f"/games/{slug}.webp")
-        except Exception as exc:
-            print(f"[{now_iso()}] Vercel Blob upload failed: {exc}")
+            blob_url = blob_response.json().get("url")
+            if isinstance(blob_url, str) and blob_url.startswith("http"):
+                return blob_url
+        except Exception as exc:  # noqa: BLE001
+            print(f"[{now_iso()}] Vercel Blob upload failed for '{slug}': {exc}")
+
+    PUBLIC_GAMES_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = PUBLIC_GAMES_DIR / f"{slug}.webp"
+    with open(output_path, "wb") as f:
+        f.write(out_bytes)
 
     return f"/games/{slug}.webp"
 
@@ -695,7 +871,10 @@ def normalize_game_urls(hrefs: Iterable[str], base_url: str) -> list[str]:
         if not game_path_pattern.match(parsed.path):
             continue
 
-        normalized = f"https://{SOURCE_DOMAIN}{parsed.path if parsed.path.endswith('/') else parsed.path + '/'}"
+        normalized = (
+            f"https://{SOURCE_DOMAIN}"
+            f"{parsed.path if parsed.path.endswith('/') else parsed.path + '/'}"
+        )
         if normalized in seen:
             continue
         seen.add(normalized)
@@ -704,18 +883,55 @@ def normalize_game_urls(hrefs: Iterable[str], base_url: str) -> list[str]:
     return urls
 
 
-async def fetch_game_urls(context: BrowserContext) -> list[str]:
-    page = await context.new_page()
-    try:
-        await page.goto(SOURCE_LIST_URL, wait_until="domcontentloaded", timeout=90_000)
-        await human_like_mouse(page)
-        hrefs: list[str] = await page.eval_on_selector_all(
-            "a[href]",
-            "anchors => anchors.map(a => a.getAttribute('href') || '')",
-        )
-        return normalize_game_urls(hrefs, SOURCE_LIST_URL)
-    finally:
-        await page.close()
+async def fetch_game_urls(context: BrowserContext, mode: str, limit: int) -> list[str]:
+    if mode == "all":
+        page = await context.new_page()
+        try:
+            await page.goto(SOURCE_LIST_URL, wait_until="domcontentloaded", timeout=90_000)
+            await human_like_mouse(page)
+            hrefs: list[str] = await page.eval_on_selector_all(
+                "a[href]",
+                "anchors => anchors.map(a => a.getAttribute('href') || '')",
+            )
+            return normalize_game_urls(hrefs, SOURCE_LIST_URL)
+        finally:
+            await page.close()
+
+    # Latest mode: crawl homepage pagination in reverse-chronological release order.
+    collected: list[str] = []
+    seen: set[str] = set()
+    max_pages = 5 if limit > 0 else 15
+    target = limit if limit > 0 else 200
+
+    for page_num in range(1, max_pages + 1):
+        feed_url = SOURCE_HOME_URL if page_num == 1 else f"{SOURCE_HOME_URL}page/{page_num}/"
+        page = await context.new_page()
+        try:
+            await page.goto(feed_url, wait_until="domcontentloaded", timeout=90_000)
+            await human_like_mouse(page)
+            # Prefer main post heading links before falling back to all page links.
+            hrefs: list[str] = await page.eval_on_selector_all(
+                ".post-title a[href], h2.post-title a[href], article a[href], a[href]",
+                "anchors => anchors.map(a => a.getAttribute('href') || '')",
+            )
+        finally:
+            await page.close()
+
+        page_urls = normalize_game_urls(hrefs, feed_url)
+        if not page_urls:
+            break
+
+        for url in page_urls:
+            if url not in seen:
+                seen.add(url)
+                collected.append(url)
+                if len(collected) >= target:
+                    return collected
+
+        if page_num < max_pages:
+            await random_delay()
+
+    return collected
 
 
 def clean_link_records(links: list[str]) -> list[dict[str, str]]:
@@ -757,16 +973,15 @@ async def scrape_game(
 
     raw_title = title_node.get_text(" ", strip=True)
     title = normalize_game_title(raw_title)
-    slug = slugify(title) or slugify(urlparse(game_url).path.strip("/")) or f"game-{int(time.time())}"
+    slug = (
+        slugify(title)
+        or slugify(urlparse(game_url).path.strip("/"))
+        or f"game-{int(time.time())}"
+    )
 
     raw_description = extract_raw_description(soup)
-    rewritten_description = rewrite_description(raw_description)
-
-    requirements = parse_requirements(soup)
-    requirements_json = json.dumps(requirements, ensure_ascii=False) if requirements else None
-
-    image_url = extract_featured_image_url(soup, game_url)
-    image_path = download_and_convert_image(session, image_url, slug)
+    rewritten_description = rewrite_description(raw_description, title=title)
+    description = rewritten_description or sanitize_text(raw_description, title=title) or title
 
     candidate_links = extract_candidate_links(soup, game_url)
     resolved_links: list[str] = []
@@ -778,11 +993,23 @@ async def scrape_game(
 
     download_links = clean_link_records(resolved_links)
 
+    invalid_reason = is_invalid_scraped_page(title, description, len(download_links))
+    if invalid_reason:
+        print(f"[{now_iso()}] Skipping invalid page ({invalid_reason}) at {game_url}")
+        return None
+
+    image_url = extract_featured_image_url(soup, game_url)
+    image_path = download_and_convert_image(session, image_url, slug)
+
     return ScrapedGame(
         title=title,
         slug=slug,
-        description=rewritten_description or sanitize_text(raw_description) or title,
-        requirements_json=requirements_json,
+        description=description,
+        requirements_json=(
+            json.dumps(reqs, ensure_ascii=False)
+            if (reqs := parse_requirements(soup))
+            else None
+        ),
         image_path=image_path,
         download_links=download_links,
         source_url=game_url,
@@ -792,11 +1019,15 @@ async def scrape_game(
 def upsert_game(conn, config: DbConfig, game: ScrapedGame) -> None:
     cursor = conn.cursor()
     placeholder = "?" if config.kind == "sqlite" else "%s"
-    cursor.execute(f'SELECT "id" FROM "Game" WHERE "slug" = {placeholder}', (game.slug,))
+    cursor.execute(
+        f'SELECT "id", "imagePath" FROM "Game" WHERE "slug" = {placeholder}',
+        (game.slug,),
+    )
     row = cursor.fetchone()
 
     if row:
         game_id = int(row["id"])
+        effective_image_path = game.image_path or row["imagePath"] or FALLBACK_IMAGE_PATH
         cursor.execute(
             f"""
             UPDATE "Game"
@@ -808,11 +1039,12 @@ def upsert_game(conn, config: DbConfig, game: ScrapedGame) -> None:
                 game.title,
                 game.description,
                 game.requirements_json,
-                game.image_path,
+                effective_image_path,
                 game_id,
             ),
         )
     else:
+        effective_image_path = game.image_path or FALLBACK_IMAGE_PATH
         if config.kind == "sqlite":
             cursor.execute(
                 """
@@ -824,7 +1056,7 @@ def upsert_game(conn, config: DbConfig, game: ScrapedGame) -> None:
                     game.slug,
                     game.description,
                     game.requirements_json,
-                    game.image_path,
+                    effective_image_path,
                 ),
             )
             game_id = int(cursor.lastrowid)
@@ -840,21 +1072,23 @@ def upsert_game(conn, config: DbConfig, game: ScrapedGame) -> None:
                     game.slug,
                     game.description,
                     game.requirements_json,
-                    game.image_path,
+                    effective_image_path,
                 ),
             )
             inserted = cursor.fetchone()
             game_id = int(inserted["id"])
 
-    cursor.execute(f'DELETE FROM "DownloadLink" WHERE "gameId" = {placeholder}', (game_id,))
-    for link in game.download_links:
-        cursor.execute(
-            f"""
-            INSERT INTO "DownloadLink" ("label", "url", "host", "gameId", "createdAt")
-            VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, CURRENT_TIMESTAMP)
-            """,
-            (link["label"], link["url"], link["host"], game_id),
-        )
+    # Only replace mirrors if the fresh scrape resolved at least one link or none existed.
+    if game.download_links or not row:
+        cursor.execute(f'DELETE FROM "DownloadLink" WHERE "gameId" = {placeholder}', (game_id,))
+        for link in game.download_links:
+            cursor.execute(
+                f"""
+                INSERT INTO "DownloadLink" ("label", "url", "host", "gameId", "createdAt")
+                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder}, CURRENT_TIMESTAMP)
+                """,
+                (link["label"], link["url"], link["host"], game_id),
+            )
 
     conn.commit()
 
@@ -869,7 +1103,7 @@ def initialize_database_only() -> None:
     print(f"[{now_iso()}] Database initialized for provider: {config.kind}")
 
 
-async def run_scraper(limit: int, dry_run: bool, rotate_every: int) -> None:
+async def run_scraper(limit: int, dry_run: bool, rotate_every: int, mode: str) -> None:
     config = resolve_db_config()
     conn = create_db_connection(config)
     init_db_schema(conn, config)
@@ -880,14 +1114,15 @@ async def run_scraper(limit: int, dry_run: bool, rotate_every: int) -> None:
 
     session = requests.Session()
     session.headers.update({"Accept-Language": "en-US,en;q=0.9"})
-    print(f"[{now_iso()}] Starting crawl from: {SOURCE_LIST_URL}")
+    start_url = SOURCE_LIST_URL if mode == "all" else SOURCE_HOME_URL
+    print(f"[{now_iso()}] Starting crawl ({mode}) from: {start_url}")
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=True)
         context = await create_context(browser)
 
         try:
-            game_urls = await fetch_game_urls(context)
+            game_urls = await fetch_game_urls(context, mode=mode, limit=limit)
             if limit > 0:
                 game_urls = game_urls[:limit]
             print(f"[{now_iso()}] Found {len(game_urls)} game URLs to process.")
@@ -905,13 +1140,6 @@ async def run_scraper(limit: int, dry_run: bool, rotate_every: int) -> None:
 
                 scraped = await scrape_game(context=context, session=session, game_url=game_url)
                 if not scraped:
-                    failed += 1
-                    continue
-
-                # Skip error pages that were scraped as if they were real games
-                error_keywords = ["error code", "server error", "gateway time", "access denied", "page not found"]
-                if any(kw in scraped.title.lower() for kw in error_keywords):
-                    print(f"[{now_iso()}] Skipping error page: '{scraped.title}'")
                     failed += 1
                     continue
 
@@ -934,7 +1162,13 @@ async def run_scraper(limit: int, dry_run: bool, rotate_every: int) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Nexus Vault local beta scraper.")
+    parser = argparse.ArgumentParser(description="Nexus Vault scraper.")
+    parser.add_argument(
+        "--mode",
+        choices=["latest", "all"],
+        default=os.getenv("SCRAPER_MODE", "latest"),
+        help="Crawl mode: 'latest' (reverse-chronological homepage) or 'all' (/games-list/).",
+    )
     parser.add_argument(
         "--limit",
         type=int,
@@ -969,7 +1203,7 @@ def main() -> None:
         return
 
     try:
-        asyncio.run(run_scraper(args.limit, args.dry_run, args.ua_rotate_every))
+        asyncio.run(run_scraper(args.limit, args.dry_run, args.ua_rotate_every, args.mode))
     except KeyboardInterrupt:
         print(f"[{now_iso()}] Scraper interrupted by user.")
 

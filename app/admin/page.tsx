@@ -1,11 +1,14 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { revalidatePath } from "next/cache";
+import { revalidatePath, revalidateTag } from "next/cache";
+import { headers } from "next/headers";
 
-import { prisma } from "@/lib/prisma";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { verifyAdminAuthorization } from "@/lib/admin-auth";
+import { encodeGameSlugPath } from "@/lib/game-data";
+import { prisma } from "@/lib/prisma";
 import { getVisitorCounter } from "@/lib/visitor-counter";
 
 export const dynamic = "force-dynamic";
@@ -15,12 +18,21 @@ export const metadata: Metadata = {
   description: "Nexus Vault operations dashboard.",
 };
 
+const VALID_ADMIN_ACTIONS = new Set(["activate", "deactivate", "touch"]);
+
 async function updateGameState(formData: FormData) {
   "use server";
 
+  const authResult = verifyAdminAuthorization(headers().get("authorization"));
+  if (!authResult.ok) {
+    throw new Error(authResult.message);
+  }
+
   const gameId = Number(formData.get("gameId"));
-  const action = String(formData.get("action"));
-  if (!Number.isFinite(gameId)) return;
+  const action = String(formData.get("action") ?? "");
+  if (!Number.isInteger(gameId) || gameId <= 0 || !VALID_ADMIN_ACTIONS.has(action)) {
+    return;
+  }
 
   if (action === "activate") {
     await prisma.game.update({ where: { id: gameId }, data: { isActive: true } });
@@ -30,6 +42,7 @@ async function updateGameState(formData: FormData) {
     await prisma.game.update({ where: { id: gameId }, data: { updatedAt: new Date() } });
   }
 
+  revalidateTag("games-highlights");
   revalidatePath("/");
   revalidatePath("/admin");
 }
@@ -63,7 +76,9 @@ export default async function AdminPage() {
       <section className="container py-10 md:py-14">
         <div className="mb-6 flex items-center justify-between">
           <div>
-            <h1 className="font-heading text-3xl font-bold text-gradient-vibrant md:text-4xl">Admin Ops</h1>
+            <h1 className="font-heading text-3xl font-bold text-gradient-vibrant md:text-4xl">
+              Admin Ops
+            </h1>
             <p className="text-sm text-muted-foreground">Moderation and synchronization controls.</p>
           </div>
           <Button asChild variant="outline">
@@ -109,7 +124,10 @@ export default async function AdminPage() {
                 className="flex flex-col gap-3 rounded-xl border border-border/60 bg-background/35 p-3 md:flex-row md:items-center md:justify-between"
               >
                 <div className="space-y-1">
-                  <Link href={`/game/${game.slug}`} className="text-sm font-semibold text-foreground hover:text-primary">
+                  <Link
+                    href={encodeGameSlugPath(game.slug)}
+                    className="text-sm font-semibold text-foreground hover:text-primary"
+                  >
                     {game.title}
                   </Link>
                   <p className="text-xs text-muted-foreground">
@@ -137,8 +155,16 @@ export default async function AdminPage() {
                   </form>
                   <form action={updateGameState}>
                     <input type="hidden" name="gameId" value={game.id} />
-                    <input type="hidden" name="action" value={game.isActive ? "deactivate" : "activate"} />
-                    <Button type="submit" variant={game.isActive ? "outline" : "default"} size="sm">
+                    <input
+                      type="hidden"
+                      name="action"
+                      value={game.isActive ? "deactivate" : "activate"}
+                    />
+                    <Button
+                      type="submit"
+                      variant={game.isActive ? "outline" : "default"}
+                      size="sm"
+                    >
                       {game.isActive ? "Deactivate" : "Activate"}
                     </Button>
                   </form>

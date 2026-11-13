@@ -22,7 +22,7 @@ export function SearchSuggestionsInput({ initialValue }: { initialValue: string 
   const [value, setValue] = React.useState(initialValue);
   const [suggestions, setSuggestions] = React.useState<Suggestion[]>([]);
   const [open, setOpen] = React.useState(false);
-  const [activeIndex, setActiveIndex] = React.useState(0);
+  const [activeIndex, setActiveIndex] = React.useState(-1);
   const abortRef = React.useRef<AbortController | null>(null);
 
   React.useEffect(() => {
@@ -34,6 +34,7 @@ export function SearchSuggestionsInput({ initialValue }: { initialValue: string 
     if (q.length < 2) {
       setSuggestions([]);
       setOpen(false);
+      setActiveIndex(-1);
       return;
     }
 
@@ -46,7 +47,7 @@ export function SearchSuggestionsInput({ initialValue }: { initialValue: string 
         const next = await fetchSuggestions(q, controller.signal);
         setSuggestions(next);
         setOpen(next.length > 0);
-        setActiveIndex(0);
+        setActiveIndex(-1);
       } catch {
         // Ignore aborted requests.
       }
@@ -60,6 +61,7 @@ export function SearchSuggestionsInput({ initialValue }: { initialValue: string 
 
   const close = React.useCallback(() => {
     setOpen(false);
+    setActiveIndex(-1);
   }, []);
 
   React.useEffect(() => {
@@ -74,6 +76,18 @@ export function SearchSuggestionsInput({ initialValue }: { initialValue: string 
     return () => document.removeEventListener("mousedown", onDocMouseDown);
   }, [close]);
 
+  const applySuggestion = React.useCallback(
+    (title: string) => {
+      setValue(title);
+      close();
+      const params = new URLSearchParams(searchParams.toString());
+      params.set("q", title.trim());
+      params.delete("page");
+      router.replace(`/?${params.toString()}`);
+    },
+    [close, router, searchParams]
+  );
+
   const onKeyDown: React.KeyboardEventHandler<HTMLInputElement> = (e) => {
     if (!open || suggestions.length === 0) return;
 
@@ -82,9 +96,13 @@ export function SearchSuggestionsInput({ initialValue }: { initialValue: string 
       setActiveIndex((i) => Math.min(suggestions.length - 1, i + 1));
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setActiveIndex((i) => Math.max(0, i - 1));
+      setActiveIndex((i) => Math.max(-1, i - 1));
     } else if (e.key === "Enter") {
-      // Do NOT navigate. Let the form submission happen normally (sorting/filter buttons work).
+      if (activeIndex >= 0 && suggestions[activeIndex]) {
+        e.preventDefault();
+        applySuggestion(suggestions[activeIndex].title);
+        return;
+      }
       close();
     } else if (e.key === "Escape") {
       e.preventDefault();
@@ -109,7 +127,7 @@ export function SearchSuggestionsInput({ initialValue }: { initialValue: string 
       />
 
       {open && (
-        <div className="absolute left-0 right-0 top-full z-30 mt-2 overflow-hidden rounded-xl border border-border/70 bg-card/90 backdrop-blur-xl shadow-lg">
+        <div className="absolute left-0 right-0 top-full z-30 mt-2 overflow-hidden rounded-xl border border-border/70 bg-card/90 shadow-lg backdrop-blur-xl">
           {suggestions.map((s, idx) => {
             const selected = idx === activeIndex;
             return (
@@ -118,19 +136,13 @@ export function SearchSuggestionsInput({ initialValue }: { initialValue: string 
                 type="button"
                 className={[
                   "block w-full px-3 py-2 text-left text-sm transition-colors",
-                  selected ? "bg-primary/15 text-foreground" : "hover:bg-secondary/60 text-muted-foreground",
+                  selected
+                    ? "bg-primary/15 text-foreground"
+                    : "text-muted-foreground hover:bg-secondary/60",
                 ].join(" ")}
                 onMouseEnter={() => setActiveIndex(idx)}
-                onMouseDown={(e) => e.preventDefault()} // keep focus so keyboard works
-                onClick={() => {
-                  // Selecting a suggestion should fill the search box only.
-                  // The user can then press Enter or click "Search Archive" so sorting/filtering work.
-                  setValue(s.title);
-                  close();
-                  const params = new URLSearchParams(searchParams);
-                  params.set("q", s.title.trim());
-                  router.replace(`/?${params.toString()}`);
-                }}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => applySuggestion(s.title)}
               >
                 {s.title}
               </button>
@@ -141,4 +153,3 @@ export function SearchSuggestionsInput({ initialValue }: { initialValue: string 
     </div>
   );
 }
-

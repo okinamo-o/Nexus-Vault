@@ -69,13 +69,13 @@ function scoreTitle(title: string, q: string) {
 
 export async function GET(request: NextRequest) {
   const url = new URL(request.url);
-  const q = (url.searchParams.get("q") ?? "").trim();
+  const q = (url.searchParams.get("q") ?? "").trim().slice(0, 100);
 
   if (q.length < 2) {
     return NextResponse.json<Suggestion[]>([]);
   }
 
-  const searchTerms = q.split(/\s+/).filter(Boolean);
+  const searchTerms = q.split(/\s+/).filter(Boolean).slice(0, 6);
 
   const candidates = await prisma.game.findMany({
     where: {
